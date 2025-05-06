@@ -1,0 +1,1030 @@
+---
+title: "Analiza oraz modelowanie wystąpienia cukrzycy"
+subtitle: "na podstawie zbioru danych dot. kobiet Indiańskiego plemienia"
+author: "Weronika Nadworska"
+format: 
+  html:
+    html-math-method: katex
+    warning: false
+    message: false
+    echo: true
+    self-contained: true
+    self-contained-math: true
+    embed-resources: true
+    lang: pl
+    section-fold: true
+    toc-location: right
+    toc: true
+    theme:
+      light: default
+      dark: darkly
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+library(corrplot)
+library(caret)
+library(rstatix)
+library(tidymodels)
+```
+
+## Wstęp
+
+Analizowany zbiór danych pochodzi z *National Institute of Diabetes and Digestive and Kidney Diseases*. Oparty jest na badaniach kobiet w wieku co najmniej 21 lat pochodzących z Indii, z plemienia Pima.
+
+## Cel badania
+
+Celem tego badania jest zidentyfikowanie cech pacjentek, które mogą mieć wpływ na wystapienie u nich cukrzycy oraz zbudowanie skutecznego modelu przewidywującego, czy pacjentka ma cukrzycę, w oparciu o określone pomiary diagnostyczne zawarte w zbiorze danych.
+
+## Opis zbioru badawczego
+
+Tabela poniżej przedstawia 6 początkowych wierszy zbioru badawczego.
+
+```{r}
+dane <- read.csv("Healthcare-Diabetes.csv")
+head(dane) |> kable(caption = "Początkowe wiersze zbioru badawczego") |> kable_styling(full_width=T, bootstrap_options  = "striped")
+
+dane <- dane[,-1]
+dane$Outcome <- as.factor(dane$Outcome)
+```
+
+Na zbiór danych składa się 2768 wierszy oraz 9 kolumn.
+
+Zmiennymi w tym zbiorze danych są:
+
+-   `Id` - indeks oznaczający nr wiersza w zbiorze,
+
+-   `Pregnancies` - liczba ciąż, które ma za sobą pacjentka,
+
+-   `Glucose` - stężenie glukozy w osoczu w ciągu 2 godzin w doustnym teście tolerancji glukozy,
+
+-   `BloodPressure` - rozkurczowe ciśnienie krwi (mm Hg),
+
+-   `SkinThickness` - grubość fałdu skórnego tricepsa (mm),
+
+-   `Insulin` - 2-godzinna insulina w surowicy (mU/ml),
+
+-   `BMI` - wskaźnik BMI pacjentki,
+
+-   `DiabetesPedigreeFunction` - funkcja rodowodu cukrzycy, wynik genetyczny cukrzycy,
+
+-   `Age` - wiek pacjentki,
+
+-   `Outcome` - określa, czy pacjentka choruje na cukrzycę (1), czy nie (0).
+
+Zmienna `Id` oznacza identyfikator pacjentki i nie będzie brana pod uwagę w dalszych analizach.
+
+Dane nie zawierają braków.
+
+W tabeli poniżej przedstawiono podstawowe statystyki opisowe dla zmiennych numerycznych w tym zbiorze danych.
+
+```{r}
+options(knitr.kable.NA=0)
+pods <- sub(".*:", "", summary(dane[,-ncol(dane)])) 
+rownames(pods) <- c("Min.", "Q1", "Median", "Mean", "Q3", "Max.")
+pods |> kable(caption = "Statystyki opisowe zmiennych numerycznych") |> kable_styling(full_width = T, bootstrap_options  = "striped") |> column_spec(column = 1, bold = T)
+```
+
+Na jej podstawie można wyciągnąć wnioski, że:
+
+-   badane pacjentki były w wieku 21-81 lat, ale zwykle miały ok. 25-29 lat,
+
+-   najmniejsze wartości dla zmiennych `Glucose`, `BloodPressure`, `SkinThickness`, `Insulin` oraz `BMI` równe zero są zastanawiające, ponieważ u zdrowego, żyjącego człowieka nie mogą występować takie wartości,
+
+-   ciekawostką jest to, że w badaniu wzięła udział pacjentka, która miała 17 dzieci. Zwykle jednak badane kobiety miały ich trójkę.
+
+-   Zastanawiający jest maksymalny poziom insuliny w surowicy równy ponad 800. Zwykle po dwóch godzinach wartość ta nie powinna przekraczać 30 mU/ml. Tutaj nawet mediana przewyższa tę wartość.
+
+```{r}
+dane[dane$Glucose==0 | dane$BloodPressure==0 | dane$SkinThickness==0 | dane$Insulin==0 | dane$BMI==0,] |> nrow() #1341
+dane[dane$Insulin>100,] |> nrow() #891
+```
+
+Po zidentyfikowaniu danych o pacjentkach, dla których wartość co najmniej jednej ze zmiennych `Glucose`, `BloodPressure`, `SkinThickness`, `Insulin` oraz `BMI` wynosi 0, okazało się, że takich przypadków jest 1341. To stanowi połowę wszystkich przebadanych pacjentek.
+
+Liczba pacjentek, dla których zmienna `Insulin` przekracza 100 wynosi 891 - to około $\frac{1}{3}$ całego zbioru danych.
+
+Skoro potencjalnych błędów w tym zbiorze danych jest aż tyle, prowokuje to do zadania pytania, czy może wartości 0 nie zostały w tym zbiorze zakodowane jako braki danych.
+
+Kwestia zmiennej `Insulin` nadal pozostaje zastanawiająca. Jej wartości wahają się między zero (1330 przypadków) a 846 (wartość znacznie przekraczającą normę dla tego parametru). Być może kobiety z tego plemienia charakteryzują się nieco innymi cechami medycznymi(?), jednak nadal pozostaje ona kwestią otwartą. Być może kolejne etapy EDA pozwolą na pewne decyzje w tej sprawie.
+
+```{r}
+dane[dane$Insulin==0,] |> nrow() #1330
+max(dane$Insulin) #846
+```
+
+Zmienne w tym zbiorze danych nie tworzą kombinacji liniowych. Zmienna `Insulin` charakteryzuje się... nearZeroVar diagnozuje predyktory, które mają jedną unikalną wartość (tj. są predyktorami o zerowej wariancji) lub predyktory, które mają obie następujące cechy: mają bardzo mało unikalnych wartości w stosunku do liczby próbek, a stosunek częstotliwości najczęstszej wartości do częstotliwości drugiej najczęstszej wartości jest duży.
+
+```{r}
+findLinearCombos(dane) #brak
+nzv(dane) #Insulin
+```
+
+##### Macierz korelacji
+
+```{r}
+dane |> 
+  dplyr::select(where(is.numeric)) |> 
+  cor() |> 
+  corrplot::corrplot()
+cor(dane$Age, dane$Pregnancies)
+```
+
+Na podstawie widocznej wyżej macierzy korelacji pomiędzy zmiennymi można dostrzec, że nie występują silne korelacje w tym zbiorze danych. Najwyższa wartość współczynnika korelacji pomiędzy zmiennymi numerycznymi w tym zbiorze wynosi 0,54 i jest to korelacja pomiędzy zmiennymi `Age` (wiek pacjentki) oraz `Pregnancies` (liczba ciąż).
+
+Dla zmiennej kategorycznej `Outcome` zaprezentowano jej możliwe poziomy oraz liczby wystąpień każdego poziomu.
+
+```{r}
+options(knitr.kable.NA='')
+summary(dane["Outcome"]) %>% kable() %>% kable_styling(full_width = F, bootstrap_options  = "striped")
+dane |> select("Outcome") |> 
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_bar()+
+  facet_wrap(~name, scales = "free")+
+  theme(legend.position = "none")+
+  xlab("Wartość")+
+  ylab("Liczba")
+```
+
+Zatem $\feac{2}{3}$ pacjentek w tym zbiorze danych nie choruje na cukrzycę, a pozostała część choruje.
+
+##### Rozkłady zmiennych
+
+```{r}
+dane |> select(-"Outcome") |> 
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_histogram(bins = 15, color = "white")+
+  facet_wrap(~name, scales = "free")+
+  theme(legend.position = "none")+
+  xlab("Wartość")+
+  ylab("Liczba")
+```
+
+Na podstawie powyższych histogramów można stwierdzić, że:
+
+-   Rozkład zmiennej `Age` jest prawistronnie asymetryczny - w badaniu wzięło udział znacznie więcej kobiet w młodym wieku (20-30 lat).
+
+-   Wartości zmiennej `BloodPressure` rozkładają się, jak w rozkładzie normalnym, jednak widoczna jest dość duża liczba zer dla tej zmiennej (ponad 100 obserwacji) - może to nieco zaburzać faktyczny rozkład tej zmiennej.
+
+-   Rozkład zmiennej BMI ma nieco asymetryczny rozkład, widać też, że prawdopodobnie występują dla tej zmiennej obserwacje odstające.
+
+-   Rozkłady zmiennych `DiabetesPedigeeFunction` oraz `Insulin` charakteryzują się prawostronną asymetrią - znacznie więcej jest mniejszych wartości dla tych zmiennych, ponadto mogą tu także występować wartości odstające. Dla zmiennej `Insulin` widać także zaobserwowaną wcześniej informację, że znaczna większość jej wartości wynosi 0.
+
+-   Rozkład zmiennej `Pregnancies` charakteryzuje się prawistronną asymetrią - zwykle badane kobiety miały 0-3 dzieci, rzadziej więcej.
+
+-   Zmienna `SkinThickness` ma bardzo dużo wartości równych 0. Najprawdopodobniej występują też dla niej obserwacje odstające (znacznie przewyższajace jej typowe wartości).
+
+```{r}
+dane |> 
+  select(-"Outcome") |>
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_boxplot()+
+  facet_wrap(~name, scales = "free")+
+  theme(legend.position = "none")
+```
+
+Wykresy ramka-wąsy dla zmiennych numerycznych w tym zbiorze również potwierdzają zaobserwowane wyżej wnioski o asymetriach rozkładów większości zmiennych. Dodatkowo, widoczne są także wartości odstające dla każdej ze zmiennych.
+
+**Podsumowanie EDA**
+
+Zera w tym zbiorze danych zostaną zakodowane jako braki danych (tylko dla zmiennych `BloodPressure`, `BMI`, `Glucose`, `Insulin` oraz `SkinThickness`). Następnie nastąpi ich imputacja. Być może to przyniesie korektę rozkładów zmiennych oraz pozwoli na wyciągnięcie prawidłowych wniosków z badania.
+
+```{r}
+dane[dane$BloodPressure==0,3] <- NA
+dane[dane$BMI==0,6] <- NA
+dane[dane$Glucose==0,2] <- NA
+dane[dane$Insulin==0,5] <- NA
+dane[dane$SkinThickness==0,4] <- NA
+```
+
+W tym momencie braki danych rozkładają się następująco na poszczególne kolumny w zbiorze:
+
+```{r}
+braki <- colSums(is.na(dane)) 
+braki <- cbind(braki)
+colnames(braki) <- "Liczba braków"
+braki |> kable() |> kable_styling(full_width = F, bootstrap_options  = "striped")
+```
+
+##### Wartości odstające
+
+```{r echo=FALSE, include=F}
+identify_outliers(dane, colnames(dane)[1])[identify_outliers(dane, colnames(dane)[1])$is.outlier==T,] # Pregnancies
+identify_outliers(dane$Pregnancies |> as_tibble()) |> view() #16 outliers
+
+identify_outliers(dane, colnames(dane)[2])[identify_outliers(dane, colnames(dane)[2])$is.outlier==T,] # Glucose
+identify_outliers(dane$Glucose |> as_tibble()) |> view() #brak
+
+identify_outliers(dane, colnames(dane)[3])[identify_outliers(dane, colnames(dane)[3])$is.outlier==T,] # BloodPressure
+identify_outliers(dane$BloodPressure |> as_tibble()) |> view() #49 outliers
+
+identify_outliers(dane, colnames(dane)[4])[identify_outliers(dane, colnames(dane)[4])$is.extreme==T,] # SkinThickness
+identify_outliers(dane$SkinThickness |> as_tibble()) |> view() #14 outliers, 5 extreme
+
+identify_outliers(dane, colnames(dane)[5])[identify_outliers(dane, colnames(dane)[5])$is.outlier==T,5] |> min() # Insulin
+identify_outliers(dane$Insulin |> as_tibble()) |> view() #84 outliers, 22 extreme
+
+identify_outliers(dane, colnames(dane)[6])[identify_outliers(dane, colnames(dane)[6])$is.outlier==T,] # BMI
+identify_outliers(dane$BMI |> as_tibble()) |> view() #36 outliers, 6 extreme
+
+identify_outliers(dane, colnames(dane)[7])[identify_outliers(dane, colnames(dane)[7])$is.outlier==T,] # PedigreeF.
+identify_outliers(dane$DiabetesPedigreeFunction |> as_tibble()) |> view() #97 outliers, 17 extreme
+
+identify_outliers(dane, colnames(dane)[8])[identify_outliers(dane, colnames(dane)[8])$is.outlier==T,] # Age
+identify_outliers(dane$Age |> as_tibble()) |> view() #64 outliers
+```
+
+Z badania występowania wartości odstajacych w tym zbiorze danych, wynikają następujące decyzje:
+
+-   dla zmiennych `Pregnancies`, `Age` oraz `Glucose` nie występują,
+
+-   dla zmiennej `BloodPressure` występują niepokojące wartości ciśnienia typu 24-38 (12 przypadków) oraz przewyższajace normę (zakres wartości 110-120) (19 przypadków), ale na ten moment zostaną pozostawione w zbiorze danych,
+
+-   ekstremalne wartości zmiennej `SkinThickness` (wartości 99-110mm) zostana usunięte ze zbioru danych,
+
+-   dla zmiennej `Insulin` odnotowano 84 przypadki wartości odstających i wszystkie one zostaną usunięte ze zbioru danych (wartości 400-750),
+
+-   dla zmiennej `BMI` odnotowano 36 przypadków, gdzie jej wartość przekracza 40 (otyłość III stopnia) (zakres wartości 52-80), jednak zostaną one w zbiorze danych,
+
+-   dla `DiabetesPedigreeFunction` odnotowano 97 pacjentek, dla których wartość tej zmiennej znacząco przewyższała jej typowe wartości, ale jest to zmienna, dla której wyższe wartości mogą świadczyć o genetycznych przesłankach za zachorowaniem pacjentki na cukrzycę, zatem pozostaną one w zbiorze danych.
+
+```{r echo=FALSE, include=FALSE}
+dane <- dane[-c(580,1348,1805,2337,2360,9,14,112,154,187,221,229,232,248,249,259,287,371,393,410,416,487,585,646,656,696,711,716,754,773,880,922,955,989,997,1000,1016,1017,1027,1055,1139,1161,1178,1184,1255,1353,1414,1424,1464,1479,1484,1522,1609,1631,1648,1654,1725,1810,1871,1881,1921,1936,1941,1979,2038,2080,2113,2147,2155,2158,2174,2175,2185,2213,2237,2243,2314,2431,2437,2502,2512,2552,2567,2572,2610,2701,2743),]
+nrow(dane)
+```
+
+Teraz w zbiorze jest 2681 wierszy.
+
+Rozkłady zmiennych po usunięciu obserwacji odstających:
+
+```{r}
+dane |> 
+  select(-"Outcome") |>
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_boxplot()+
+  facet_wrap(~name, scales = "free")+
+  theme(legend.position = "none")
+```
+
+##### Imputacja braków danych
+
+Braki danych w zmiennej BloodPressure (123 przypadki) oraz Glucose (18) zostaną zastąpione średnią, ponieważ ich rozkład jest zbliżony do rozkładu normalnego. Dla zmiennej SkinThickness (800 przypadków), BMI (39 przypadków) oraz Insulin (1327) zastosowana zostanie metoda $k$-najbliższych sąsiadów w procesie imputacji braków danych.
+
+```{r}
+dane[is.na(dane$BloodPressure)==T,3] <- mean(dane$BloodPressure, na.rm = T) |> round(digits = 0)
+dane[is.na(dane$Glucose)==T,2] <- mean(dane$Glucose, na.rm = T) |> round(digits = 0)
+dane <- DMwR2::knnImputation(dane, k=5, scale=T, meth='pmm')
+```
+
+Rozkłady zmiennych po imputacji braków danych:
+
+```{r}
+dane |> 
+  select(-"Outcome") |>
+  pivot_longer(cols = everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_histogram()+
+  facet_wrap(~name, scales = "free")+
+  theme(legend.position = "none")
+```
+
+Można wyciągnąć wniosek, że rozkłady zmiennych poprawiły się ze względu na asymetrię - usunięcie obserwacji odstających wpłynęło na ich korektę.
+
+## Analiza statystyczna występowania cukrzcy
+
+```{r}
+alfa <- 0.05
+```
+
+W badaniu przyjęto poziom istotności $\alpha=0,05$.
+
+
+#### ze względu na wiek pacjentki
+
+```{r}
+# przedział ufności dla średniej, model 3 bo nie wiemy o normalnosci, a l. próbek>100
+x <- mean(dane$Age)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$Age)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=Age, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład wieku w podziale na pacjentki \nbez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$Age[dane$Outcome==1]), col="#ee5e5e", main="Rozkład wieku w podziale na pacjentki \nbez cukrzycy oraz z cukrzycą")
+lines(density(dane$Age[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, widać wyraźnie, że w grupie pacjentek chorych na cukrzycę częściej występują pacjentki z większym wiekiem, niż ma to miejsce w grupie pacjentek zdrowych. Z wykresu ramka-wąsy widać także, że dla grupy chorych typowe wartości wieku zaczynają się od około 30 lat i obejmują wiek do 45 lat, podczas gdy dla grupy zdrowych typowy wiek mieści się w przedziale od 23 do 37.
+
+```{r}
+dane %>% 
+  group_by(Outcome) |> 
+  summarise(Min=min(Age),
+            Q1=quantile(Age, 0.25),
+            Mean=mean(Age),
+            Q3=quantile(Age, 0.75),
+            Max=max(Age),
+            sd=sd(Age),
+            V=sd(Age)/mean(Age)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia wieku w grupie bez cukrzycy wynosi około 31, a w grupie z cukrzycą niemal 37, a więc jest nieco wyższa. W grupie z cukrzycą odchylenie standardowe dla wieku jest nieco niższe. Zróżnicowanie tej cechy jest więc nieco mniejsze niż w grupie bez cukrzycy, co oznacza, że wartości są trochę bardziej skupione blisko średniej. Tę różnicę widać tym bardziej we współczynnikach zmienności. Dla grupy zdrowych pacjentek współczynnik zmienności wieku wynosi około 38%, czyli zmienność jest poniżej średniej. Dla grupy pacjentek chorych na cukrzycę ta wartość wynosi 29%, a więc zmienność wieku jest nieco mniejsza w tej grupie.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `Age`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu wieku w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(Age) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji wieku w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje wieku w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'Age'], dane[dane$Outcome==1, 'Age'])
+```
+
+Wariancje w obu grupach są różne i nie pojawia się rozkład normalny. Testem odpowiednim do sprawdzenia równości średniej wieku w grupach przy takich założeniach byłby test Manna-Whitneya. Z powodu dużej liczebności próby zdecydowano się użyć jednak testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'Age'], dane[dane$Outcome==1, 'Age'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości średniej wieku w grupach pacjentów z udarem i bez udaru (p-value bliskie zeru).
+
+Wiek może być zatem czynnikiem wpływającym na wystąpienie cukrzycy u badanych pacjentek.
+
+### ze względu na poziom glukozy we krwi
+
+```{r}
+x <- mean(dane$Glucose)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$Glucose)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=Glucose, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład poziomu glukozy we krwi \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$Glucose[dane$Outcome==1]), col="#ee5e5e", main="Rozkład poziomu glukozy we krwi \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")
+lines(density(dane$Glucose[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, widać wyraźnie, że w grupie pacjentek chorych na cukrzycę częściej występują pacjentki z większym poziomem glukozy we krwi, niż ma to miejsce w grupie pacjentek zdrowych. Z wykresu ramka-wąsy widać, że dla grupy chorych typowe wartości tego czynnika obejmują wartości 90-130, podczas gdy dla grupy zdrowych typowy zakres mieści się w przedziale 125-170.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  summarise(Min=min(Glucose),
+            Q1=quantile(Glucose, 0.25),
+            Mean=mean(Glucose),
+            Q3=quantile(Glucose, 0.75),
+            Max=max(Glucose),
+            sd=sd(Glucose),
+            V=sd(Glucose)/mean(Glucose)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia poziomu glikozy we krwi w grupie bez cukrzycy wynosi około 110, a w grupie z cukrzycą ponad 140, a więc jest wyższa. W grupie z cukrzycą odchylenie standardowe dla analizowanego czynnika wyższe. Zróżnicowanie tej cechy jest więc większe niż w grupie bez cukrzycy, co oznacza, że wartości są mniej skupione blisko średniej. Zmienność w grupie zdrowych wynosi tu 22%, a w grupie chorych niecałe 21%, nie ma tu zatem dużych różnic.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `Glucose`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu glukozy we krwi w grupach.
+
+```{r}
+dane |>  
+  group_by(Outcome) |> 
+  shapiro_test(Glucose) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje poziomu glukozy we krwi w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'Glucose'], dane[dane$Outcome==1, 'Glucose'])
+```
+
+Wariancje w obu grupach są różne i nie pojawia się rozkład normalny. Testem odpowiednim do sprawdzenia równości średniej wieku w grupach przy takich założeniach byłby test Manna-Whitneya. Z powodu dużej liczebności próby zdecydowano się użyć jednak testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'Glucose'], dane[dane$Outcome==1, 'Glucose'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości średniego poziomu glkozy we krwi w grupach pacjentek chorych na cukrzycę oraz zdrowych (p-value bliskie zeru).
+
+Poziom glukozy we krwi może być zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+### ze względu na poziom ciśnienia tętniczego
+
+```{r}
+x <- mean(dane$BloodPressure)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$BloodPressure)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=BloodPressure, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład ciśnienia tętniczego \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$BloodPressure[dane$Outcome==1]), col="#ee5e5e", main="Rozkład ciśnienia tętniczego \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")
+lines(density(dane$BloodPressure[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, nie widać wyraźnych różnic pomiędzy grupami pacjentek chorych na cukrzycę oraz zdrowych.
+
+```{r}
+dane |>  
+  group_by(Outcome) |> 
+  summarise(Min=min(BloodPressure),
+            Q1=quantile(BloodPressure, 0.25),
+            Mean=mean(BloodPressure),
+            Q3=quantile(BloodPressure, 0.75),
+            Max=max(BloodPressure),
+            sd=sd(BloodPressure),
+            V=sd(BloodPressure)/mean(BloodPressure)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia wartość ciśneinia tętniczego w grupie pacjentek bez cukrzycy wynosi około 71, a w grupie z cukrzycą ponad 75, a więc jest nieco wyższa, jednak nieznacznie. Odchylenie standardowe dla analizowanego czynnika jest na podobnym poziomie w obu grupach. Zróżnicowanie tej cechy nie jest więc znaczące. Zmienność w grupie zdrowych wynosi tu niemal 17%, a w grupie chorych niecałe 16%, jest ono zatem bardzo zbliżone.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `BloodPressure`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu glukozy we krwi w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(BloodPressure) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje poziomu glukozy we krwi w grupach są równe. Test $F$ to potwierdza - nie ma podstaw do odrzucenia hipotezy o równości wariancji w badanych grupach.
+
+```{r}
+var.test(dane[dane$Outcome==0, 'BloodPressure'], dane[dane$Outcome==1, 'BloodPressure'])
+```
+
+Poziom ciśnienia tętniczego krwi nie jest zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+### ze względu na poziom insuliny we krwi
+
+```{r}
+x <- mean(dane$Insulin)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$Insulin)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=Insulin, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład poziomu insuliny we krwi \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$Insulin[dane$Outcome==1]), col="#ee5e5e", main="Rozkład poziomu insuliny we krwi \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")
+lines(density(dane$Insulin[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, widać, że w grupie pacjentek chorych na cukrzycę częściej występują pacjentki z większym poziomem insuliny we krwi, niż ma to miejsce w grupie pacjentek zdrowych. Z wykresu ramka-wąsy widać, że dla grupy chorych typowe wartości tego czynnika obejmują zakres 140-210, podczas gdy dla grupy zdrowych typowy zakres mieści się w przedziale 80-160.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  summarise(Min=min(Insulin),
+            Q1=quantile(Insulin, 0.25),
+            Mean=mean(Insulin),
+            Q3=quantile(Insulin, 0.75),
+            Max=max(Insulin),
+            sd=sd(Insulin),
+            V=sd(Insulin)/mean(Insulin)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Na podstawie tabeli ze statystykami opisowymi możemy zauważyć, że średnia poziomu insuliny we krwi w grupie bez cukrzycy wynosi około 117, a w grupie z cukrzycą ponad 173, a więc jest znacznie wyższa. W grupie z cukrzycą odchylenie standardowe dla analizowanego czynnika jest bardzo zbliżone do grupy pacjentek zdrowych. Zmienność w grupie pacjentek zdrowych wynosi tu niecałe 38%, a w grupie chorych ponad 57%, zatem jest to zmienność średnia.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `Insulin`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu insuliny we krwi w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(Insulin) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje poziomu glukozy we krwi w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'Insulin'], dane[dane$Outcome==1, 'Insulin'])
+```
+
+Wariancje w obu grupach są takie same i nie pojawia się rozkład normalny. Testem odpowiednim do sprawdzenia równości średniej wieku w grupach przy takich założeniach byłby test Manna-Whitneya. Z powodu dużej liczebności próby zdecydowano się użyć jednak testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'Insulin'], dane[dane$Outcome==1, 'Insulin'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości średniego poziomu insuliny we krwi w grupach pacjentek chorych na cukrzycę oraz zdrowych (p-value bliskie zeru).
+
+Poziom insuliny we krwi niekoniecznie jest zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+### ze względu na wartość BMI
+
+```{r}
+x <- mean(dane$BMI)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$BMI)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=BMI, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład poziomu BMI w podziale na pacjentki \nbez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$BMI[dane$Outcome==1]), col="#ee5e5e", main="Rozkład poziomu BMI w podziale na pacjentki \nbez cukrzycy oraz z cukrzycą")
+lines(density(dane$BMI[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, można zauważyć, że w grupie pacjentek chorych na cukrzycę częściej występują pacjentki z większym poziomem BMI, niż ma to miejsce w grupie pacjentek zdrowych, choć nie są to tak duże różnice.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  summarise(Min=min(BMI),
+            Q1=quantile(BMI, 0.25),
+            Mean=mean(BMI),
+            Q3=quantile(BMI, 0.75),
+            Max=max(BMI),
+            sd=sd(BMI),
+            V=sd(BMI)/mean(BMI)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia BMI w grupie bez cukrzycy wynosi około 31, a w grupie z cukrzycą ponad 35, a więc jest nieco wyższa. W obu grupach odchylenie standardowe dla analizowanego czynnika jest niemal identyczne. Zróżnicowanie tej cechy jest więc takie samo. Zmienność w grupie zdrowych wynosi tu 22%, a w grupie chorych niecałe 20%, nie ma tu zatem dużych różnic.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `BMI`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu glukozy we krwi w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(BMI) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje poziomu glukozy we krwi w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'BMI'], dane[dane$Outcome==1, 'BMI'])
+```
+
+Wariancje w obu grupach nie są różne i nie pojawia się rozkład normalny. Testem odpowiednim do sprawdzenia równości średniej wieku w grupach przy takich założeniach byłby test Manna-Whitneya. Z powodu dużej liczebności próby zdecydowano się użyć jednak testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'BMI'], dane[dane$Outcome==1, 'BMI'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości czynnika BMI w grupach pacjentek chorych na cukrzycę oraz zdrowych (p-value bliskie zeru).
+
+Wartość BMI niekoniecznie jest zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+### ze względu na grubość fałdu skórnego na tricepsie
+
+```{r}
+x <- mean(dane$SkinThickness)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$SkinThickness)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=SkinThickness, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład grubości badanego fałdu skórnego \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$SkinThickness[dane$Outcome==1]), col="#ee5e5e", main="Rozkład grubości badanego fałdu skórnego \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")
+lines(density(dane$SkinThickness[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, widać wyraźnie, że w grupie pacjentek chorych na cukrzycę częściej występują pacjentki z większą grubością badanego fałdu skórnego, niż ma to miejsce w grupie pacjentek zdrowych. Z wykresu ramka-wąsy widać, że dla grupy chorych typowe wartości tego czynnika obejmują wartości 30-40, podczas gdy dla grupy zdrowych typowy zakres mieści się w przedziale 20-35.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  summarise(Min=min(SkinThickness),
+            Q1=quantile(SkinThickness, 0.25),
+            Mean=mean(SkinThickness),
+            Q3=quantile(SkinThickness, 0.75),
+            Max=max(SkinThickness),
+            sd=sd(SkinThickness),
+            V=sd(SkinThickness)/mean(SkinThickness)*100,
+            n=n()) |>  
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia grubość badanego fałdu skórnego w grupie bez cukrzycy wynosi około 27, a w grupie z cukrzycą niemal 33, a więc jest nieco wyższa. W grupie z cukrzycą odchylenie standardowe dla analizowanego czynnika wynosi niecałe 9, a dla grupy pacjentek zdrowych niecałe 10. Zróżnicowanie tej cechy jest więc zbliżone w obu grupach. Zmienność w grupie zdrowych wynosi tu 36%, a w grupie chorych niecałe 27%.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `SkinThickness`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu glukozy we krwi w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(SkinThickness) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje grubości badanego fałdu skórnego w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'SkinThickness'], dane[dane$Outcome==1, 'SkinThickness'])
+```
+
+Wariancje w obu grupach są różne i nie pojawia się rozkład normalny. Z powodu dużej liczebności próby zdecydowano się użyć testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'SkinThickness'], dane[dane$Outcome==1, 'SkinThickness'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości średniego poziomu glkozy we krwi w grupach pacjentek chorych na cukrzycę oraz zdrowych (p-value bliskie zeru).
+
+Grubość badanego fałdu skórnego może być zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+### ze względu na wartość funkcji cukrzycy
+
+```{r}
+x <- mean(dane$DiabetesPedigreeFunction)
+u <- qnorm(1-alfa/2)
+s <- sd(dane$DiabetesPedigreeFunction)
+n <- nrow(dane)
+lk <- x-u*s/sqrt(n-1)
+pk <- x+u*s/sqrt(n-1)
+```
+
+Przedział ufności dla średniego wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+lk <- s/(1+u/sqrt(2*n))
+pk <- s/(1-u/sqrt(2*n))
+```
+
+Przedział ufności dla wariancji wieku ma postać (`r round(lk,2)`, `r round(pk,2)`).
+
+```{r}
+ggplot(dane, aes(x=Outcome, y=DiabetesPedigreeFunction, fill=Outcome))+
+  geom_boxplot()+
+  scale_fill_manual(values=c("#7777D9", "#ee5e5e"))+
+  labs(title="Rozkład wartości funkcji cukrzycy \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")+
+  theme_bw()
+```
+
+```{r}
+plot(density(dane$DiabetesPedigreeFunction[dane$Outcome==1]), col="#ee5e5e", main="Rozkład wartości funkcji cukrzycy \nw podziale na pacjentki bez cukrzycy oraz z cukrzycą")
+lines(density(dane$DiabetesPedigreeFunction[dane$Outcome==0]), col="#7777D9")
+legend("topright", legend=c("zdrowa", "chora"), col=c("#7777D9", "#ee5e5e"), lty=1)
+```
+
+Zarówno z wykresu ramka-wąsy, jak i z wykresu gęstości, nie widać znaczących różnic pomiędzy grupą pacjentek chorych oraz zdrowych względem analizowanego czynnika.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  summarise(Min=min(DiabetesPedigreeFunction),
+            Q1=quantile(DiabetesPedigreeFunction, 0.25),
+            Mean=mean(DiabetesPedigreeFunction),
+            Q3=quantile(DiabetesPedigreeFunction, 0.75),
+            Max=max(DiabetesPedigreeFunction),
+            sd=sd(DiabetesPedigreeFunction),
+            V=sd(DiabetesPedigreeFunction)/mean(DiabetesPedigreeFunction)*100,
+            n=n()) |> 
+  kable() |> 
+  kable_styling(bootstrap_options = "striped")
+```
+
+Z tabeli ze statystykami opisowymi możemy zauważyć, że średnia wartości badanego czynnika w grupie bez cukrzycy wynosi około 0,43, a w grupie z cukrzycą około 0,54, a więc jest nieco wyższa. W obu grupach wartość odchylenia standardowego jest zbliżone. To samo ma miejsce pod względem współczynnika zmienności - wynosi on około 67%, zatem przewyższa średnią.
+
+Poniżej wyświetlono wyniki testu Shapiro-Wilka dla obu grup pacjentów dla zmiennej `DiabetesPedigreeFunction`. W obu grupach p-value z testu jest bardzo bliskie zeru. Jednoznacznie należy odrzucić hipotezę o normalności rozkładu poziomu glukozy we krwi w grupach.
+
+```{r}
+dane |> 
+  group_by(Outcome) |> 
+  shapiro_test(DiabetesPedigreeFunction) |> 
+  kable() |> 
+  kable_styling()
+```
+
+Przeprowadzono również test równości wariancji tej zmiennej w grupach. Na podstawie wcześniej opisanych statystyk, można przypuszczać, że wariancje poziomu glukozy we krwi w grupach nie są równe. Test $F$ potwierdza te przypuszczenia (p-value jest bardzo bliskie zeru).
+
+```{r}
+var.test(dane[dane$Outcome==0, 'DiabetesPedigreeFunction'], dane[dane$Outcome==1, 'DiabetesPedigreeFunction'])
+```
+
+Wariancje w obu grupach są różne i nie pojawia się rozkład normalny. Testem odpowiednim do sprawdzenia równości średniej wieku w grupach przy takich założeniach byłby test Manna-Whitneya. Z powodu dużej liczebności próby zdecydowano się użyć jednak testu $T$, mimo braku normalności.
+
+```{r}
+t.test(dane[dane$Outcome==0, 'DiabetesPedigreeFunction'], dane[dane$Outcome==1, 'DiabetesPedigreeFunction'], var.equal = F, alternative = "less")
+```
+
+Test $T$ każe nam odrzucić hipotezę o równości średniego poziomu glkozy we krwi w grupach pacjentek chorych na cukrzycę oraz zdrowych (p-value bliskie zeru).
+
+Poziom glukozy we krwi może być zatem czynnikiem wpływającym na wystąpienie cukrzycy.
+
+**Podsumowanie:**
+
+Na podstawie przeprowadzonych analiz i testów, możemy wysnuć następujące wnioski:
+
+1.  Zmienne: wiek, poziom insuliny oraz glukozy we krwi, grubość fałdu skórnego na tricepsie, wartość funkcji cukrzycy mogą być cechami, które istotnie wpływają na wystąpienie cukrzycy u pacjentki. W grupie pacjentek chorych typowe wartości tych zmiennych były nieco wyższe niż w grupie zdrowych.
+
+2.  Poziom ciśneinia krwi oraz wartość BMI raczej nie mają wpływu na wystąpienie cukrzycy w tej grupie badanych. Struktura tych zmiennych nie różni się istotnie pomiędzy grupami pacjentek chorych oraz zdrowych
+
+## Modelowanie wystąpienia cukrzycy
+
+W kolejnych korkach preprocessingu podzielimy dane na zbiór uczący i testowy oraz dokonamy transformacji rozkładów predyktorów do rozkładu normalnego.
+
+```{r}
+set.seed(2025)
+split <- initial_split(dane, prop = 0.7)
+df_train <- training(split)
+df_test <- testing(split)
+
+rec <- recipe(Outcome ~ ., data = df_train) |> 
+  step_normalize(all_numeric_predictors())
+```
+
+### Budowa modeli
+
+Najpierw wyznaczymy tzw. model bazowy. Używa się go do sprawdzenia, czy modele uczenia maszynowego faktycznie przewyższają dopasowaniem model bazowy - tylko wtedy warto je rozważać.
+
+Do oceny jakości dopasowania użyjemy dwóch miar *accuracy* oraz *specificity*. Oceny dopasowania dokonamy z wykorzystaniem sprawdzianu krzyżowego 5-krotnego bez powtórzeń.
+
+```{r}
+folds <- vfold_cv(df_train, v = 5)
+
+metrics <- metric_set(accuracy, spec)
+
+null_regression <- parsnip::null_model() |> 
+  set_engine("parsnip") |> 
+  set_mode("classification")
+
+null_wf <- workflow() |> 
+  add_recipe(rec) |> 
+  add_model(null_regression)
+
+null_res <- fit_resamples(null_wf, resamples = folds, metrics = metrics)
+
+collect_metrics(null_res) |> kable() |> kable_styling(full_width = F)
+```
+
+Na ten moment średni wynik miary *accuracy* dla modelu bazowego wynosi około 66%.
+
+Zbudowane teraz zostaną różne modele - lasu losowego, drzewa decyzyjnego, modelu $k$-najbliższych sąsiadów, regresji logistycznej, modelu SVM oraz sieci neuronowej.
+
+```{r}
+neural_model <- mlp() |> 
+  set_engine("nnet") |> 
+  set_mode("classification")
+
+svm_model <- svm_rbf() |> 
+  set_engine("kernlab") |> 
+  set_mode("classification")
+
+logreg_model <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification")
+
+rpart_model <-decision_tree() |>  
+   set_engine("rpart") |> 
+   set_mode("classification")
+
+rf_model <- rand_forest() |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+knn_model <- nearest_neighbor(neighbors = 5) |> 
+  set_engine('kknn') |> 
+  set_mode('classification')
+
+models <- workflow_set(preproc = list(rec), 
+                       models = list(svm = svm_model, rf=rf_model, knn=knn_model, rpart=rpart_model, logreg=logreg_model, neural=neural_model), cross = T)
+models
+```
+
+Dopasowanie do zbioru treningowego:
+
+```{r}
+models <- models |>  
+  workflow_map("fit_resamples", 
+               verbose = TRUE,
+               resamples = folds,
+               metrics = metrics)
+```
+
+
+```{r}
+collect_metrics(models)
+```
+
+Najlepsze wartości dopasowania uzyskał model lasu losowego (97% miary *accuracy*). Na zbliżonym poziomie do tego pozostały także wyniki modelu kNN. Warto również zaznaczyć, że przewyższają one zdecydowanie jakością dopasowania model bazowy.
+
+#### Tuning modeli
+
+W tej części pracy przeprowadzona zostanie optymalizacja parametrów najlepszego modelu. Do optymalizacji zostanie wykorzystana metoda przeszukiwania siatki. Tuningowany będzie model lasu losowego.
+
+```{r}
+rf <- rand_forest(mode = "classification",
+                  engine = "ranger", 
+                  mtry = tune(), 
+                  trees = tune(), 
+                  min_n = tune())
+rf_param <- extract_parameter_set_dials(rf)
+rf_param
+
+rf_param <- finalize(rf_param, df_train)
+rf_param
+```
+
+```{r}
+rf_wf <- workflow() |> 
+  add_recipe(rec) |> 
+  add_model(rf)
+```
+
+```{r}
+rf_search <- rf_wf |> 
+  tune_grid(resamples = folds, metrics = metrics)
+```
+
+```{r}
+autoplot(rf_search, type = 'marginals', metric = 'accuracy')
+```
+
+```{r}
+show_best(rf_search, metric = "accuracy")
+```
+
+W wyniku przeszukiwania siatki, otrzymano 5 propozycji optymalnych hiperparametrów modelu lasu losowego; pierwsza skutkuje poprawieniem średniej miary *accuracy* do poziomu 98%.
+
+#### Ocena dopasowania modelu końcowego
+
+Jako najlepsze hiperparametry modelu zostaną wybrane te na pozycji pierwszej.
+
+```{r}
+best_params <- select_best(rf_search, metric = "accuracy")
+
+final_wf <- rf_wf |> 
+  finalize_workflow(best_params) 
+
+final_wf
+```
+
+Dopasowanie do zbioru testowego.
+
+```{r}
+final_fit <- final_wf |> 
+  last_fit(split)
+
+final_fit$.metrics
+```
+
+Dopasowanie do danych testowych na podstawie miary *accuracy* wynosi 97%. Pole pod krzywą ROC wynosi niemal 1.
+
+```{r}
+final_fit$.predictions[[1]]  |> 
+  roc_curve(truth = Outcome, .pred_0) |> 
+  autoplot()
+```
+
+Poniżej przedstawiono macierz klasyfikacji.
+
+```{r}
+final_fit$.predictions[[1]] |> 
+  conf_mat(truth = Outcome, estimate = .pred_class)
+```
+
+## Podsumowanie
+
+W wyniku modelowania udało się zbudować (stuningowany) model lasu losowego skutecznie (w 97% na danych testowych) klasyfikującego pacjentki chore na cukrzycę.
